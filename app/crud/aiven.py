@@ -100,3 +100,16 @@ class AivenCRUD:
             return False
         finally: 
             session.close()
+
+    def read_all(self, table):
+        if table not in self.allowed_tables: return []
+        session = self.manager.get_aiven_session()
+        try:
+            query = text(f"SELECT * FROM {table}")
+            result = session.execute(query).fetchall()
+            return [dict(row._mapping) for row in result]
+        except Exception as e:
+            logging.error(f"Aiven Read All Error: {e}")
+            return []
+        finally: 
+            session.close()

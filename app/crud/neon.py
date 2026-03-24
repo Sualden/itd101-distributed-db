@@ -74,3 +74,17 @@ class NeonCRUD:
             return "Delete Failed"
         finally: 
             session.close()
+
+    def read_all(self, table):
+        if table not in self.allowed_tables: return []
+        session = self.manager.get_neon_session()
+        try:
+            query = text(f"SELECT * FROM {table}")
+            result = session.execute(query).fetchall()
+            return [dict(row._mapping) for row in result]
+        except Exception as e:
+            logging.error(f"Neon Read All Error: {e}")
+            return []
+        finally: 
+            session.close()
+            

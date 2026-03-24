@@ -18,3 +18,13 @@ class RedisCRUD:
     def delete(self, key, table_ignored=None): 
         client = self.manager.get_redis_client()
         return client.delete(key)
+
+    def read_all(self, table):
+        client = self.manager.get_redis_client()
+        try:
+            keys = client.keys(f"{table}:*")
+            if not keys: return []
+            values = client.mget(keys)
+            return [json.loads(v) if v else None for v in values]
+        except Exception as e:
+            return []

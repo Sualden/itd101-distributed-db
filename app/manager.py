@@ -1,8 +1,10 @@
+import logging
 import os
 import redis
 import boto3
 import certifi
 import uuid 
+import time
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -83,11 +85,7 @@ class UniversalManager:
                         ],
                         BillingMode='PAY_PER_REQUEST'
                     )
-                    
-                    # Wait until AWS finishes creating this specific table before moving on
                     table.meta.client.get_waiter('table_exists').wait(TableName=t_name)
-                #    print(f"Success! The '{t_name}' table is now active in DynamoDB.")
-                
         except Exception as e:
             print(f" DynamoDB Table Setup Error: {e}")
 
@@ -99,11 +97,18 @@ class UniversalManager:
         handler, db_type = self._get_handler(table)
         
         if db_type == "mongo":
+            if "id" not in data:
+                data["id"] = self.redis_client.incr(f"{table}_sequence")
             res_id = await handler.create(table, data)
         elif db_type == "redis":
-            new_id = str(uuid.uuid4())[:8]
+            new_id = self.redis_client.incr(f"{table}_sequence")
             redis_key = f"{table}:{new_id}"
             handler.create(redis_key, data)
+            res_id = new_id
+        elif db_type == "dynamo":
+            new_id = self.redis_client.incr(f"{table}_sequence")
+            data["id"] = str(new_id)  # <--- FORCE IT TO BE A STRING HERE
+            handler.create(table, data)
             res_id = new_id
         else:
             res_id = handler.create(table, data)
@@ -145,7 +150,7 @@ class UniversalManager:
         elif db_type == "dynamo":
             return handler.delete(table, {"id": str(item_id)})
         return handler.delete(table, del_id)
-
+    
     def get_neon_session(self): return self.NeonSession()
     def get_aiven_session(self): return self.AivenSession()
     def get_mongo_db(self): return self.mongo_db

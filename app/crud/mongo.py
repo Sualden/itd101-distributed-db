@@ -1,3 +1,4 @@
+import time
 from bson.objectid import ObjectId
 
 class MongoCRUD:
@@ -7,8 +8,7 @@ class MongoCRUD:
     async def create(self, collection, document):
         db = self.manager.get_mongo_db()
         result = await db[collection].insert_one(document)
-        return str(result.inserted_id)
-
+        return document.get("id", str(result.inserted_id))
     async def read(self, collection, doc_id):
         db = self.manager.get_mongo_db()
         try:
@@ -55,3 +55,14 @@ class MongoCRUD:
             return {"deleted_count": result.deleted_count}
         except: 
             return {"deleted_count": 0}
+        
+    async def read_all(self, collection):
+        db = self.manager.get_mongo_db()
+        try:
+            cursor = db[collection].find({})
+            docs = await cursor.to_list(length=1000)
+            for doc in docs:
+                doc['_id'] = str(doc['_id'])
+            return docs
+        except Exception as e: 
+            return []   

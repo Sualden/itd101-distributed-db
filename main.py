@@ -5,7 +5,8 @@ from typing import Dict, Any
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 from sqlalchemy import text
 import uvicorn
-import uuid 
+import time
+
 
 from app.manager import UniversalManager
 
@@ -13,7 +14,7 @@ from app.manager import UniversalManager
 # API METADATA FOR DOCUMENTATION
 # ==========================================
 description = """
-**ITD101 Distributed Database System API** 🚀
+**ITD101 Distributed Database System API** 
 
 This API acts as a universal manager routing data across 5 distinct database architectures:
 * **Relational (SQL):** PostgreSQL (Neon) & MySQL (Aiven)
@@ -30,7 +31,7 @@ This API acts as a universal manager routing data across 5 distinct database arc
 tags_metadata = [
     {"name": "System Info", "description": "Check system health and database routing rules."},
     {"name": "CRUD Operations", "description": "Create, Read, Update, and Delete data globally or specifically."},
-    {"name": "Danger Zone", "description": "Destructive commands to wipe databases."}
+ #     {"name": "Danger Zone", "description": "Destructive commands to wipe databases."}
 ]
 
 app = FastAPI(
@@ -75,13 +76,60 @@ def root():
         "Architecture": "Client-Server"
     }
 
-@app.get("/directory", tags=["System Info"], summary="Get Database Routing Map")
-def get_database_directory():
-    """Displays the active nodes and the routing map dictating which tables belong to which databases."""
+@app.get("/directory/{db_name}", tags=["System Info"], summary="Dump All Data from a Database")
+async def get_all_db_data(db_name: str):
+    """
+    **Diagnostic Tool:** Fetches every single record from every single table.
+    Use /directory/all to dump the ENTIRE distributed system at once!
+    """
+    all_tables = ["users", "inventory", "logs", "orders", "sessions", "products"]
+    
+    # 1. THE NEW "MASTER DUMP" FEATURE
+    if db_name == "all":
+        master_dump = {}
+        for name, handler in db_manager.handlers.items():
+            db_data = {}
+            
+            for table in all_tables:
+                try:
+                    if name == "mongo":
+                        db_data[table] = await handler.read_all(table)
+                    else:
+                        db_data[table] = handler.read_all(table)
+                except Exception as e:
+                    db_data[table] = f"Error: {str(e)}"
+            
+            master_dump[name.upper()] = db_data
+            
+        return {
+            "status": "Success",
+            "node": "GLOBAL_SYSTEM_DUMP",
+            "total_databases_scanned": len(db_manager.handlers),
+            "data": master_dump
+        }
+    if db_name not in db_manager.handlers:
+        raise HTTPException(
+            status_code=404, 
+            detail=f"Database '{db_name}' not found. Available nodes: {list(db_manager.handlers.keys())} or use 'all'"
+        )
+    
+    handler = db_manager.handlers[db_name]
+    database_dump = {}
+    
+    for table in all_tables:
+        try:
+            if db_name == "mongo":
+                database_dump[table] = await handler.read_all(table)
+            else:
+                database_dump[table] = handler.read_all(table)
+        except Exception as e:
+            database_dump[table] = f"Could not fetch: {str(e)}"
+            
     return {
-        "message": "Global Distributed Database Routing Directory",
-        "total_nodes_active": len(db_manager.handlers),
-        "data_locations": db_manager.route_map
+        "status": "Success",
+        "node": db_name.upper(),
+        "tables_scanned": len(all_tables),
+        "data": database_dump
     }
 
 # ==========================================
@@ -137,15 +185,16 @@ async def create_data(
         handler = db_manager.handlers[target_val]
         try:
             if target_val == "mongo": 
+                if "id" not in data:
+                    data["id"] = db_manager.redis_client.incr(f"{table}_sequence")
                 res_id = await handler.create(table, data)
             elif target_val == "redis": 
-                new_id = str(uuid.uuid4())[:8]
+                new_id = db_manager.redis_client.incr(f"{table}_sequence")
                 handler.create(f"{table}:{new_id}", data)
                 res_id = new_id
             elif target_val == "dynamo":
-                # FIX: DynamoDB cannot auto-generate IDs. We must generate and inject one!
-                new_id = str(uuid.uuid4())[:8]
-                data["id"] = new_id
+                new_id = db_manager.redis_client.incr(f"{table}_sequence")
+                data["id"] = str(new_id)  # <--- FORCE IT TO BE A STRING HERE
                 handler.create(table, data)
                 res_id = new_id
             else: 
@@ -297,59 +346,6 @@ async def delete_data(
     else:
         raise HTTPException(400, detail="Invalid target parameter.")
 
-# ==========================================
-# DANGER ZONE
-# ==========================================
-@app.delete("/wipe/{table}", tags=["Danger Zone"], summary="Wipe Table & Reset IDs")
-async def wipe_all_data(table: str):
-    """
-    ⚠️ **DANGEROUS** ⚠️
-    This action will securely connect to all 5 architectures (PostgreSQL, MySQL, MongoDB, Redis, DynamoDB), 
-    delete EVERY record inside the requested table, and forcefully reset the SQL ID counters back to 1.
-    """
-    results = {}
-
-    for db_name, session_maker in [("neon", db_manager.NeonSession), ("aiven", db_manager.AivenSession)]:
-        session = session_maker()
-        try:
-            if db_name == "neon": session.execute(text(f"TRUNCATE TABLE {table} RESTART IDENTITY CASCADE"))
-            elif db_name == "aiven": session.execute(text(f"TRUNCATE TABLE {table}"))
-            session.commit()
-            results[db_name] = "Success: Table Cleared & IDs Reset to 1"
-        except Exception as e:
-            session.rollback()
-            results[db_name] = f"Error: {str(e)}"
-        finally:
-            session.close()
-
-    try:
-        mongo_db = db_manager.get_mongo_db()
-        del_result = await mongo_db[table].delete_many({})
-        results["mongo"] = f"Success: Wiped {del_result.deleted_count} documents"
-    except Exception as e: results["mongo"] = f"Error: {str(e)}"
-
-    try:
-        redis_client = db_manager.get_redis_client()
-        keys = redis_client.keys(f"{table}:*")
-        if keys: redis_client.delete(*keys); results["redis"] = f"Success: Wiped {len(keys)} keys"
-        else: results["redis"] = "Success: No keys found"
-    except Exception as e: results["redis"] = f"Error: {str(e)}"
-
-    try:
-        dynamo_table = db_manager.get_dynamo_resource().Table(table)
-        response = dynamo_table.scan()
-        items = response.get('Items', [])
-        if items:
-            with dynamo_table.batch_writer() as batch:
-                for item in items: batch.delete_item(Key={'id': item['id']})
-            results["dynamo"] = f"Success: Wiped {len(items)} items"
-        else: results["dynamo"] = "Success: No items found"
-    except Exception as e: results["dynamo"] = f"Error: {str(e)}"
-
-    return {
-        "message": f"🚨 GLOBAL WIPE & ID RESET EXECUTED FOR TABLE: {table.upper()} 🚨",
-        "results": results
-    }
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=9090, reload=True)

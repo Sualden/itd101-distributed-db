@@ -58,3 +58,12 @@ class DynamoCRUD:
         
         dynamo_table.delete_item(Key=query_key)
         return True
+    
+    def read_all(self, table):
+        resource = self.manager.get_dynamo_resource()
+        dynamo_table = resource.Table(table)
+        try:
+            response = dynamo_table.scan()
+            return response.get("Items", [])
+        except Exception as e:
+            return []
